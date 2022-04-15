@@ -34,6 +34,7 @@ where
     broker_connection_retry: bool,
     broker_connection_max_retries: u32,
     broker_connection_retry_delay: u32,
+    broker_task_delay: Option<u64>,
     default_queue: String,
     task_options: TaskOptions,
     task_routes: Vec<(String, String)>,
@@ -69,6 +70,7 @@ where
                 broker_connection_retry: true,
                 broker_connection_max_retries: 5,
                 broker_connection_retry_delay: 5,
+                broker_task_delay: None,
                 default_queue: "celery".into(),
                 task_options: TaskOptions::default(),
                 task_routes: vec![],
@@ -200,6 +202,12 @@ where
         self
     }
 
+    /// Set the amount of time to wait after completing each task. Used to rate limit the consumption of tasks.
+    pub fn broker_task_delay(mut self, task_delay: u64) -> Self {
+        self.config.broker_task_delay = Some(task_delay);
+        self
+    }
+
     /// Construct a `Celery` app with the current configuration.
     pub async fn build(self) -> Result<Celery<Bb::Broker>, CeleryError> {
         // Declare default queue to broker.
@@ -235,6 +243,7 @@ where
             broker_connection_retry: self.config.broker_connection_retry,
             broker_connection_max_retries: self.config.broker_connection_max_retries,
             broker_connection_retry_delay: self.config.broker_connection_retry_delay,
+            broker_task_delay: self.config.broker_task_delay,
         })
     }
 }
@@ -268,6 +277,9 @@ pub struct Celery<B: Broker> {
     broker_connection_retry: bool,
     broker_connection_max_retries: u32,
     broker_connection_retry_delay: u32,
+
+    /// Duration in milliseconds to wait after processing each task.
+    broker_task_delay: Option<u64>,
 }
 
 impl<B> Celery<B>
@@ -594,6 +606,10 @@ where
         let (task_event_tx, mut task_event_rx) = mpsc::unbounded_channel::<TaskEvent>();
         let mut pending_tasks = 0;
 
+        let delay = self
+            .broker_task_delay
+            .map(tokio::time::Duration::from_millis);
+
         // This is the main loop where we receive deliveries and pass them off
         // to be handled by spawning `self.handle_delivery`.
         // At the same time we are also listening for a SIGINT (Ctrl+C) or SIGTERM interruption.
@@ -609,6 +625,9 @@ where
                                 let task_event_tx = task_event_tx.clone();
                                 debug!("Received delivery from {}: {:?}", queue, delivery);
                                 tokio::spawn(self.handle_delivery(delivery, task_event_tx));
+                                if let Some(delay) = delay {
+                                    tokio::time::delay_for(delay).await;
+                                }
                             }
                             Err(e) => {
                                 error!("Deliver failed: {}", e);
